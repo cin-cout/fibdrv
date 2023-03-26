@@ -1,0 +1,11 @@
+{
+    "files.associations": {
+        "bignum.h": "c",
+        "module.h": "c",
+        "limits": "c",
+        "fcntl.h": "c",
+        "stdio.h": "c",
+        "unistd.h": "c",
+        "stdlib.h": "c"
+    }
+}

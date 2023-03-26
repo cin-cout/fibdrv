@@ -6,6 +6,8 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
 
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
@@ -14,29 +16,116 @@ MODULE_VERSION("0.1");
 
 #define DEV_FIBONACCI_NAME "fibonacci"
 
-/* MAX_LENGTH is set to 92 because
- * ssize_t can't fit the number > 92
- */
-#define MAX_LENGTH 92
+#define MAX_LENGTH 500
 
 static dev_t fib_dev = 0;
 static struct cdev *fib_cdev;
 static struct class *fib_class;
 static DEFINE_MUTEX(fib_mutex);
 
-static long long fib_sequence(long long k)
+struct bn {
+    int cur_size;
+    int max_size;
+    unsigned long long *digits;
+};
+
+static struct bn *bn_init(int k)
 {
-    /* FIXME: C99 variable-length array (VLA) is not allowed in Linux kernel. */
-    long long f[k + 2];
-
-    f[0] = 0;
-    f[1] = 1;
-
-    for (int i = 2; i <= k; i++) {
-        f[i] = f[i - 1] + f[i - 2];
+    if (k <= 0) {
+        return NULL;
     }
 
-    return f[k];
+    struct bn *new = kmalloc(sizeof(struct bn), GFP_KERNEL);
+    if (!new) {
+        return NULL;
+    }
+
+    new->digits = kmalloc(sizeof(long long) * k, GFP_KERNEL);
+    if (!new->digits) {
+        kfree(new);
+        return NULL;
+    }
+
+    memset(new->digits, 0ULL, sizeof(long long) * k);
+    new->max_size = k;
+    new->cur_size = 1;
+    return new;
+}
+
+static void bn_swap(struct bn *a, struct bn *b)
+{
+    if (!a || !b) {
+        return;
+    }
+
+    struct bn tmp = *a;
+    *a = *b;
+    *b = tmp;
+}
+
+static void bn_add(struct bn *dst, struct bn *a, struct bn *b)
+{
+    if (!dst || !a || !b) {
+        return;
+    }
+    /*b->cur_size must bigger than a->cur_size*/
+    if (a->cur_size > b->cur_size) {
+        bn_swap(a, b);
+    }
+    int carry = 0;
+
+    for (int i = 0; i < b->cur_size; i++) {
+        if (i >= a->cur_size) {
+            dst->digits[i] = b->digits[i] + carry;
+            if (b->digits[i] + carry == 0ULL) {
+                carry = 1;
+            } else {
+                carry = 0;
+            }
+        } else {
+            int last_carry = carry;
+            if (a->digits[i] + carry > ~b->digits[i]) {
+                carry = 1;
+            } else {
+                carry = 0;
+            }
+            dst->digits[i] = a->digits[i] + b->digits[i] + last_carry;
+        }
+    }
+    dst->cur_size = b->cur_size;
+    if (carry) {
+        dst->digits[b->cur_size] = 1ULL;
+        dst->cur_size++;
+    }
+}
+
+static void bn_release(struct bn *a)
+{
+    kfree(a->digits);
+    kfree(a);
+}
+
+static struct bn *fib_sequence(long long k)
+{
+    if (k < 0) {
+        return NULL;
+    }
+    int ll_size = (-181 + k * 109) / 1000 + 1;
+    struct bn *a = bn_init(ll_size);
+    struct bn *b = bn_init(ll_size);
+    b->digits[0] = 1ULL;
+
+    for (int i = 2; i <= k; i++) {
+        bn_add(a, a, b);
+        bn_swap(a, b);
+    }
+
+    if (k == 0) {
+        bn_swap(a, b);
+    }
+
+    bn_release(a);
+    return b;
 }
 
 static int fib_open(struct inode *inode, struct file *file)
@@ -60,7 +149,11 @@ static ssize_t fib_read(struct file *file,
                         size_t size,
                         loff_t *offset)
 {
-    return (ssize_t) fib_sequence(*offset);
+    struct bn *a = fib_sequence(*offset);
+    size_t sz = a->cur_size * sizeof(unsigned long long);
+    copy_to_user(buf, a->digits, sz);
+    bn_release(a);
+    return sz;
 }
 
 /* write operation is skipped */
