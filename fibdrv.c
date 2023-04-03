@@ -17,6 +17,7 @@ MODULE_VERSION("0.1");
 #define DEV_FIBONACCI_NAME "fibonacci"
 
 #define MAX_LENGTH 500
+#define OF_CHECK 9223372036854775808
 
 static dev_t fib_dev = 0;
 static struct cdev *fib_cdev;
@@ -50,6 +51,12 @@ static struct bn *bn_init(int k)
     new->max_size = k;
     new->cur_size = 1;
     return new;
+}
+
+static void bn_release(struct bn *a)
+{
+    kfree(a->digits);
+    kfree(a);
 }
 
 static void bn_swap(struct bn *a, struct bn *b)
@@ -99,10 +106,97 @@ static void bn_add(struct bn *dst, struct bn *a, struct bn *b)
     }
 }
 
-static void bn_release(struct bn *a)
+static void bn_shift(struct bn *dst, int k, struct bn *a)
 {
-    kfree(a->digits);
-    kfree(a);
+    for (int i = 0; i < k; i++) {
+        int carry = 0;
+        for (int j = 0; j < a->cur_size; j++) {
+            dst->digits[j] = a->digits[j] << 1;
+            if (carry) {
+                dst->digits[j]++;
+            }
+            if (a->digits[j] & OF_CHECK) {
+                carry = 1;
+            } else {
+                carry = 0;
+            }
+        }
+
+        dst->cur_size = a->cur_size;
+        if (carry) {
+            dst->digits[a->cur_size] = 1ULL;
+            dst->cur_size++;
+        }
+    }
+}
+
+static void bn_sub(struct bn *dst, struct bn *a, struct bn *b)
+{
+    if (a->cur_size < b->cur_size) {
+        bn_swap(a, b);
+    }
+
+    int borrow = 0;
+    unsigned long long mll = -1;
+    for (int i = 0; i < a->cur_size; i++) {
+        if (i >= b->cur_size) {
+            dst->digits[i] = a->digits[i];
+            if (borrow) {
+                if (a->digits[i] == 0) {
+                    borrow = 1;
+                } else {
+                    borrow = 0;
+                }
+                dst->digits[i]--;
+            }
+        } else {
+            if (a->digits[i] - borrow < b->digits[i] ||
+                (borrow == 1 && a->digits[i] == 0)) {
+                dst->digits[i] =
+                    (mll - b->digits[i] - borrow) + a->digits[i] + 1;
+                borrow = 1;
+            } else {
+                dst->digits[i] = a->digits[i] - b->digits[i] - borrow;
+                borrow = 0;
+            }
+        }
+    }
+
+    for (int i = dst->max_size - 1; i >= 0; i--) {
+        if (dst->digits[i]) {
+            dst->cur_size = i + 1;
+            break;
+        }
+    }
+}
+
+static void bn_mul(struct bn *dst, struct bn *a, struct bn *b)
+{
+    /*a or b cannot equal to dst*/
+    for (int i = 0; i < b->cur_size; i++) {
+        unsigned __int128 res = 0;
+        unsigned long long carry = 0ULL;
+        for (int j = 0; j < a->cur_size; j++) {
+            res = (unsigned __int128) a->digits[j] *
+                      (unsigned __int128) b->digits[i] +
+                  carry;
+            carry = res >> 64;
+            if (dst->digits[j + i] > (long long) ~res) {
+                carry++;
+            }
+            dst->digits[j + i] += (long long) res;
+        }
+        if (carry) {
+            dst->digits[a->cur_size + i] = carry;
+        }
+    }
+
+    for (int i = dst->max_size - 1; i >= 0; i--) {
+        if (dst->digits[i]) {
+            dst->cur_size = i + 1;
+            break;
+        }
+    }
 }
 
 static struct bn *fib_sequence(long long k)
@@ -128,6 +222,50 @@ static struct bn *fib_sequence(long long k)
     return b;
 }
 
+static struct bn *fib_fast_doubling(long long k)
+{
+    unsigned int h = 0;
+    for (long long i = k; i; h++, i >>= 1)
+        ;
+
+    int ll_size = (-181 + k * 109) / 1000 + 1;
+    struct bn *a = bn_init(ll_size);
+    struct bn *b = bn_init(ll_size);
+    struct bn *c = bn_init(ll_size);
+    struct bn *tmp = bn_init(ll_size);
+    struct bn *d = bn_init(ll_size);
+    b->digits[0] = 1ULL;
+
+    for (long long mask = 1 << (h - 1); mask; mask >>= 1) {
+        // c = a * (2 * b - a);188
+        // d = a * a + b * b189
+        memset(c->digits, 0ULL, sizeof(long long) * ll_size);
+        bn_shift(tmp, 1, b);
+        bn_sub(tmp, tmp, a);
+        bn_mul(c, a, tmp);
+
+        memset(d->digits, 0ULL, sizeof(long long) * ll_size);
+        memset(tmp->digits, 0ULL, sizeof(long long) * ll_size);
+        bn_mul(d, a, a);
+        bn_mul(tmp, b, b);
+        bn_add(d, d, tmp);
+
+        if (mask & k) {
+            bn_add(b, c, d);
+            bn_swap(a, d);
+        } else {
+            bn_swap(a, c);
+            bn_swap(b, d);
+        }
+    }
+
+    bn_release(b);
+    bn_release(d);
+    bn_release(tmp);
+    bn_release(c);
+    return a;
+}
+
 static int fib_open(struct inode *inode, struct file *file)
 {
     if (!mutex_trylock(&fib_mutex)) {
@@ -149,7 +287,8 @@ static ssize_t fib_read(struct file *file,
                         size_t size,
                         loff_t *offset)
 {
-    struct bn *a = fib_sequence(*offset);
+    // struct bn *a = fib_sequence(*offset);
+    struct bn *a = fib_fast_doubling(*offset);
     size_t sz = a->cur_size * sizeof(unsigned long long);
     copy_to_user(buf, a->digits, sz);
     bn_release(a);
