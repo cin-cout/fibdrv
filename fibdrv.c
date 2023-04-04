@@ -4,6 +4,7 @@
 #include <linux/init.h>
 #include <linux/kdev_t.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
@@ -287,8 +288,15 @@ static ssize_t fib_read(struct file *file,
                         size_t size,
                         loff_t *offset)
 {
-    // struct bn *a = fib_sequence(*offset);
-    struct bn *a = fib_fast_doubling(*offset);
+    struct bn *a;
+    switch (size) {
+    case 0:
+        a = fib_sequence(*offset);
+        break;
+    case 1:
+        a = fib_fast_doubling(*offset);
+        break;
+    }
     size_t sz = a->cur_size * sizeof(unsigned long long);
     copy_to_user(buf, a->digits, sz);
     bn_release(a);
@@ -301,7 +309,22 @@ static ssize_t fib_write(struct file *file,
                          size_t size,
                          loff_t *offset)
 {
-    return 1;
+    ktime_t kt;
+    struct bn *a;
+    switch (size) {
+    case 0:
+        kt = ktime_get();
+        a = fib_sequence(*offset);
+        kt = ktime_sub(ktime_get(), kt);
+        break;
+    case 1:
+        kt = ktime_get();
+        a = fib_fast_doubling(*offset);
+        kt = ktime_sub(ktime_get(), kt);
+        break;
+    }
+    bn_release(a);
+    return (ssize_t) ktime_to_ns(kt);
 }
 
 static loff_t fib_device_lseek(struct file *file, loff_t offset, int orig)
